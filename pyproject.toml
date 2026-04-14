@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "local-apt-repo-updater"
+version = "0.1.0"
+description = "Tool to fetch remote .deb files and create a local APT repo from them"
+dependencies = ["requests", "PyYAML", "platformdirs"]
+readme = "README.md"
+requires-python = ">=3.10"
+
+[project.urls]
+"Homepage" = "https://github.com/gene1wood/local-apt-repo-updater"
+"Bug Reports" = "https://github.com/gene1wood/local-apt-repo-updater/issues"
+"Say Thanks!" = "https://saythanks.io/to/gene1wood"
+"Source" = "https://github.com/gene1wood/local-apt-repo-updater"
+
+[project.scripts]
+local-apt-repo-updater = "local_apt_repo_updater.cli:main"
+
+[tool.black]
+preview = true
+unstable = true

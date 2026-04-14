@@ -1,0 +1,11 @@
+apt_repo_directory: /path/to/apt/repo
+github_releases:
+- repo: https://github.com/example/project
+  filename: example-{APP_VERSION}.deb
+fixed_urls:
+- url: https://example.com/downloads
+  filename: example.deb
+  conditional: last_modified
+- url: https://no-lastmodified-headers.example.net/linux/repo/ubuntu_{VERSION_ID}/amd64
+  filename: example_{VERSION_ID}_amd64.deb
+  conditional: content_length
