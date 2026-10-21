@@ -36,20 +36,23 @@ def fetch_packages(entries: list[dict], repo_dir: Path, env: dict) -> bool:
     """
     changed = False
     for entry in entries:
-        base_url = entry["url"].format(**env)
-        filename = entry["filename"].format(**env)
-        url = f"{base_url}/{filename}"
-        dest = repo_dir / filename
+        try:
+            base_url = entry["url"].format(**env)
+            filename = entry["filename"].format(**env)
+            url = f"{base_url}/{filename}"
+            dest = repo_dir / filename
 
-        mode = entry.get("conditional", "last_modified")
-        fetch_fn = _FETCH_MODES.get(mode)
-        if fetch_fn is None:
-            raise ValueError(
-                f"Unknown conditional mode: {mode!r}. Valid modes: {list(_FETCH_MODES)}"
-            )
+            mode = entry.get("conditional", "last_modified")
+            fetch_fn = _FETCH_MODES.get(mode)
+            if fetch_fn is None:
+                raise ValueError(
+                    f"Unknown conditional mode: {mode!r}. Valid modes: {list(_FETCH_MODES)}"
+                )
 
-        logger.debug(f"Processing {url} (mode={mode})")
-        if fetch_fn(url, dest):
-            changed = True
+            logger.debug(f"Processing {url} (mode={mode})")
+            if fetch_fn(url, dest):
+                changed = True
+        except Exception as e:
+            logger.error(f"Failed to fetch {entry.get('url', entry)!r}: {e}")
 
     return changed

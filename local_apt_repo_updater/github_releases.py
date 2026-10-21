@@ -131,60 +131,68 @@ def fetch_packages(entries: list[dict], repo_dir: Path, env: dict) -> bool:
     """
     changed = False
     for entry in entries:
-        if entry.get("use_latest_tag", True):
-            tag = get_latest_release(entry["repo"])
-        else:
-            tag = get_latest_stable_release(entry["repo"])
-        version = tag.lstrip("v")
-
-        pattern = entry["filename"].format(APP_VERSION=version, **env)
-        is_wildcard = "*" in pattern or "?" in pattern
-        if is_wildcard:
-            assets = get_release_assets(entry["repo"], tag)
-            matched = [a for a in assets if fnmatch.fnmatch(a["name"], pattern)]
-            if not matched:
-                logger.warning(
-                    f"No release assets matched pattern {pattern!r} for "
-                    f"{entry['repo']} tag {tag}"
-                )
-                continue
-            if len(matched) > 1:
-                logger.warning(
-                    f"Multiple assets matched {pattern!r} for {entry['repo']} tag {tag}: "
-                    f"{[a['name'] for a in matched]!r}, using {matched[0]['name']!r}"
-                )
-            filename = matched[0]["name"]
-            url = matched[0]["browser_download_url"]
-        else:
-            filename = pattern
-            url = f"{entry['repo']}/releases/download/{tag}/{filename}"
-
         try:
-            if fetch_if_modified_since(url, repo_dir / filename):
-                changed = True
-        except requests.exceptions.HTTPError as e:
-            if (
-                e.response is not None
-                and e.response.status_code == 404
-                and not is_wildcard
-            ):
-                try:
-                    assets = get_release_assets(entry["repo"], tag)
-                    asset_info = f"  Available assets for tag {tag}: {[a['name'] for a in assets]}"
-                except requests.exceptions.HTTPError:
-                    asset_info = (
-                        f"  Could not fetch asset list for tag {tag!r} — "
-                        f"the tag may not exist as a GitHub release."
-                    )
-                logger.error(
-                    f"File not found: {url}\n"
-                    f"  The filename '{entry['filename']}' expanded to '{filename}' "
-                    f"for {entry['repo']} tag {tag} does not exist.\n"
-                    f"{asset_info}\n"
-                    f"  Fix the 'filename' value in config.yaml, or use a wildcard "
-                    f"pattern (e.g. '*_{{}}.deb') to match automatically."
-                )
+            if entry.get("use_latest_tag", True):
+                tag = get_latest_release(entry["repo"])
             else:
-                raise
+                tag = get_latest_stable_release(entry["repo"])
+            version = tag.lstrip("v")
+
+            pattern = entry["filename"].format(APP_VERSION=version, **env)
+            is_wildcard = "*" in pattern or "?" in pattern
+            if is_wildcard:
+                assets = get_release_assets(entry["repo"], tag)
+                matched = [a for a in assets if fnmatch.fnmatch(a["name"], pattern)]
+                if not matched:
+                    logger.warning(
+                        f"No release assets matched pattern {pattern!r} for "
+                        f"{entry['repo']} tag {tag}"
+                    )
+                    continue
+                if len(matched) > 1:
+                    logger.warning(
+                        f"Multiple assets matched {pattern!r} for {entry['repo']} tag {tag}: "
+                        f"{[a['name'] for a in matched]!r}, using {matched[0]['name']!r}"
+                    )
+                filename = matched[0]["name"]
+                url = matched[0]["browser_download_url"]
+            else:
+                filename = pattern
+                url = f"{entry['repo']}/releases/download/{tag}/{filename}"
+
+            try:
+                if fetch_if_modified_since(url, repo_dir / filename):
+                    changed = True
+            except requests.exceptions.HTTPError as e:
+                if (
+                    e.response is not None
+                    and e.response.status_code == 404
+                    and not is_wildcard
+                ):
+                    try:
+                        assets = get_release_assets(entry["repo"], tag)
+                        asset_info = (
+                            f"  Available assets for tag {tag}: "
+                            f"{[a['name'] for a in assets]}"
+                        )
+                    except requests.exceptions.HTTPError:
+                        asset_info = (
+                            f"  Could not fetch asset list for tag {tag!r} — "
+                            f"the tag may not exist as a GitHub release."
+                        )
+                    logger.error(
+                        f"File not found: {url}\n"
+                        f"  The filename '{entry['filename']}' expanded to '{filename}' "
+                        f"for {entry['repo']} tag {tag} does not exist.\n"
+                        f"{asset_info}\n"
+                        f"  Fix the 'filename' value in config.yaml, or use a wildcard "
+                        f"pattern (e.g. '*_{{}}.deb') to match automatically."
+                    )
+                else:
+                    raise
+        except Exception as e:
+            logger.error(
+                f"Failed to fetch release for {entry.get('repo', entry)!r}: {e}"
+            )
 
     return changed

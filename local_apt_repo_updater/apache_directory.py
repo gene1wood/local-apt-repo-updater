@@ -215,33 +215,36 @@ def fetch_packages(entries: list[dict], repo_dir: Path, env: dict) -> bool:
     """
     changed = False
     for entry in entries:
-        entry_env = dict(env)
+        try:
+            entry_env = dict(env)
 
-        if "version_url" in entry:
-            version_url = entry["version_url"].format(**entry_env)
-            app_version = find_newest_version(version_url)
-            if app_version is None:
-                logger.warning(f"No version subdirectories found at {version_url}")
-                continue
-            logger.debug(f"Newest version at {version_url}: {app_version}")
-            entry_env["APP_VERSION"] = app_version
+            if "version_url" in entry:
+                version_url = entry["version_url"].format(**entry_env)
+                app_version = find_newest_version(version_url)
+                if app_version is None:
+                    logger.warning(f"No version subdirectories found at {version_url}")
+                    continue
+                logger.debug(f"Newest version at {version_url}: {app_version}")
+                entry_env["APP_VERSION"] = app_version
 
-        url = entry["url"].format(**entry_env)
-        raw = entry["filename"]
-        patterns = [
-            p.format(**entry_env) for p in (raw if isinstance(raw, list) else [raw])
-        ]
+            url = entry["url"].format(**entry_env)
+            raw = entry["filename"]
+            patterns = [
+                p.format(**entry_env) for p in (raw if isinstance(raw, list) else [raw])
+            ]
 
-        for pattern in patterns:
-            filename = find_newest_deb(url, pattern)
-            if filename is None:
-                logger.warning(f"No .deb files matching {pattern!r} found at {url}")
-                continue
+            for pattern in patterns:
+                filename = find_newest_deb(url, pattern)
+                if filename is None:
+                    logger.warning(f"No .deb files matching {pattern!r} found at {url}")
+                    continue
 
-            file_url = f"{url.rstrip('/')}/{filename}"
-            dest = repo_dir / filename
-            logger.debug(f"Newest match for {pattern!r} at {url}: {filename}")
-            if fetch_if_modified_since(file_url, dest):
-                changed = True
+                file_url = f"{url.rstrip('/')}/{filename}"
+                dest = repo_dir / filename
+                logger.debug(f"Newest match for {pattern!r} at {url}: {filename}")
+                if fetch_if_modified_since(file_url, dest):
+                    changed = True
+        except Exception as e:
+            logger.error(f"Failed to process {entry.get('url', entry)!r}: {e}")
 
     return changed

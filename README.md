@@ -113,6 +113,8 @@ Other keys from `os-release` (e.g. `ID_LIKE`, `UBUNTU_CODENAME`) are also availa
 
 ### Example configuration
 
+`apt_repo_directory` defaults to `/srv/local-apt-repo` if omitted.
+
 ```yaml
 apt_repo_directory: /path/to/apt/repo
 github_releases:
@@ -144,10 +146,116 @@ or
 
 ---
 
+### Running automatically before `apt update`
+
+`local-apt-repo-updater` can install itself as an [`APT::Update::Pre-Invoke`](https://manpages.ubuntu.com/manpages/noble/man5/apt.conf.5.html)
+hook so that it runs — and the local repo's metadata is refreshed — every time `apt update` runs,
+and can also add the `sources.list.d` entry apt needs to actually consume that repo:
+
+```bash
+sudo local-apt-repo-updater install-apt-hook
+sudo local-apt-repo-updater install-sources-list
+```
+
+`install-apt-hook` writes a snippet like the following to
+`/etc/apt/apt.conf.d/99local-apt-repo-updater`:
+
+```
+// Managed by `local-apt-repo-updater install-apt-hook`
+APT::Update::Pre-Invoke {
+  "/root/.local/bin/local-apt-repo-updater";
+};
+```
+
+The executable path is auto-detected; pass `--executable /path/to/local-apt-repo-updater` to
+override it, or `--path` to write the snippet somewhere other than the default apt.conf.d filename.
+
+`install-sources-list` writes a snippet like the following to
+`/etc/apt/sources.list.d/local-apt-repo-updater.list`:
+
+```
+deb [signed-by=/etc/apt/keyrings/local-apt-repo-updater.gpg] file:///srv/local-apt-repo ./
+```
+
+It points at `apt_repo_directory` from config.yaml if that's set, otherwise at the same
+`/srv/local-apt-repo` default the updater itself falls back to; pass `--repo-dir` to override it,
+`--keyring` to export the signing key somewhere other than the default, or `--path` to write the
+entry somewhere other than the default filename. Running it doesn't require config.yaml to exist
+yet.
+
+Both commands must be run as root (e.g. via `sudo`), since `/etc/apt/` is not writable otherwise.
+
+A few things to check for this to work correctly:
+
+- **Config file location**: `apt update` normally runs as root, and `sudo` resets `$HOME` to
+  `/root` by default, so the config must live at `/root/.config/local-apt-repo-updater/config.yaml`
+  (or wherever `$XDG_CONFIG_HOME` resolves to for root), not the invoking user's own config
+  directory.
+- **`apt-ftparchive`/`gpg` on root's `PATH`**: the hook runs with whatever `PATH` the `apt update`
+  invocation has, which may be more restrictive than an interactive login shell's `PATH` (e.g. a
+  `sudoers` `secure_path`, or a cron/unattended-upgrades environment). Confirm `apt-ftparchive` and
+  `gpg` are both reachable from there, not just from your own shell.
+- **Signed, not `[trusted=yes]`, repository**: this tool generates a dedicated, passphrase-less
+  GPG key the first time it's needed (in `/var/lib/local-apt-repo-updater/gnupg`, mode `0700`, with
+  no passphrase since it must sign unattended from the Pre-Invoke hook — its secrecy comes entirely
+  from that directory's permissions, not a passphrase) and uses it to produce a real `InRelease` /
+  `Release.gpg` on every rebuild. `install-sources-list` exports the matching public key and points
+  the sources.list entry at it via `signed-by=`, so `apt update` cryptographically verifies the
+  repo instead of trusting it unconditionally. This protects against corruption or tampering of the
+  repo directory by anything that doesn't hold that key; it does **not** verify that the upstream
+  `.deb` a provider downloaded is what the vendor actually published — see "Upstream authenticity"
+  below for why. If `/var/lib/local-apt-repo-updater/gnupg` is ever lost, a new key is generated and
+  re-exported automatically on the next rebuild (or the next `install-sources-list` run) — no manual
+  re-trust step needed, since `signed-by=` just reads whatever key is currently at that path.
+- **`apt_repo_directory` must only be writable by root**: since this tool re-signs whatever
+  `.deb` files it finds there on every rebuild, write access to that directory is equivalent to
+  write access to the signed repo — anyone who can drop a file in gets it legitimately signed on
+  the next run. Both the normal run and `install-sources-list` refuse to proceed if the directory
+  (once it exists) isn't owned by root or is group-/world-writable, raising a clear error instead
+  of silently trusting it. This only checks the directory itself, not its ancestors or POSIX ACLs,
+  so it's still worth confirming nothing above it in the path is writable by anyone untrusted. A
+  directory this tool creates itself on first run is always `0755` root-owned regardless of your
+  umask.
+- **A failed fetch never aborts `apt update`**: when run as the Pre-Invoke hook, this tool always
+  exits `0`, even if a provider couldn't reach its upstream (network blip, GitHub rate limiting,
+  etc.) or `config.yaml` itself is missing or invalid. Problems are logged as errors instead of
+  raised, so one broken package source never blocks `apt update` for everything else, and
+  previously-fetched packages are left in place rather than removed. On an interactive terminal
+  those error/warning lines print in red/yellow so they stand out in `apt update`'s own console
+  output; set `NO_COLOR=1` to disable that. Run `local-apt-repo-updater -v` directly (or check
+  wherever `apt update`'s output is logged, e.g. for unattended-upgrades) to see what actually
+  failed.
+
+#### Upstream authenticity
+
+Signing the local repo (above) only proves the `Packages`/`Release`/`.deb` files apt reads weren't
+changed after this tool wrote them. It says nothing about whether the bytes a provider downloaded
+match what the upstream vendor actually published, because none of the three sources this tool
+pulls from give it anything to verify that against:
+
+- **`github_releases`**: GitHub doesn't sign release assets. Some API responses include a
+  GitHub-computed `sha256` digest, which only proves the file wasn't corrupted in transit, not that
+  it's what the maintainer intended to publish. A handful of projects additionally publish a
+  detached `.asc`/`.sig` or checksum file as a separate release asset, but that's per-project, not
+  something this tool can check generically.
+- **`fixed_urls`**: entirely vendor-dependent; assume nothing is verifiable unless you know
+  otherwise for your specific source.
+- **`apache_directory`**: just an HTML directory listing — no signatures at all. If an entry here
+  is actually mirroring a real signed apt repo (as opposed to a bare `.deb` dump), the better fix
+  is to skip this tool for that source and add the vendor's real apt repo (with their real signing
+  key) directly instead.
+
+All fetches go over HTTPS with normal TLS verification (nothing in this codebase disables it), so
+each download is at least protected against being altered in transit from the host it names.
+Beyond that, upstream authenticity isn't verified today.
+
+---
+
 ## Requirements
 
 - Python 3.10+
 - apt-ftparchive in PATH
+- gpg (GnuPG) in PATH
 - Python packages:
   - requests
   - PyYAML
@@ -158,3 +266,5 @@ or
 ## Design notes
 
 - Uses HTTP HEAD and conditional GETs to minimize bandwidth
+- Signs its own repository metadata with a dedicated, auto-generated GPG key rather than relying
+  on `[trusted=yes]`; see "Running automatically before `apt update`" above

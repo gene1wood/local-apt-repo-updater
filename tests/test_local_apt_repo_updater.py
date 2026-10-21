@@ -13,6 +13,7 @@ from local_apt_repo_updater import (
     fixed_urls,
     github_releases,
     apache_directory,
+    signing,
 )
 from local_apt_repo_updater.cli import main, setup_logging
 from local_apt_repo_updater.fetchers import (
@@ -582,6 +583,23 @@ class TestGitHubFetchPackages:
         with self._patch_latest(), self._patch_fetch(False):
             assert gh_fetch_packages(entries, tmp_path, {}) is False
 
+    def test_one_entry_failing_does_not_block_others(self, tmp_path, caplog):
+        entries = [
+            self.BASE_ENTRY,
+            {**self.BASE_ENTRY, "filename": "other-{APP_VERSION}.deb"},
+        ]
+        with (
+            patch(
+                "local_apt_repo_updater.github_releases.get_latest_release",
+                side_effect=[ConnectionError("boom"), "v1.2.3"],
+            ),
+            self._patch_fetch(True),
+        ):
+            with caplog.at_level(logging.ERROR):
+                result = gh_fetch_packages(entries, tmp_path, {})
+        assert result is True
+        assert any("Failed to fetch release" in m for m in caplog.messages)
+
     def test_use_latest_tag_true_calls_get_latest_release(self, tmp_path):
         entry = {**self.BASE_ENTRY, "use_latest_tag": True}
         with (
@@ -788,10 +806,12 @@ class TestFixedUrlsFetchPackages:
             fixed_fetch_packages([entry], tmp_path, {})
             mock_fn.assert_called_once()
 
-    def test_unknown_mode_raises_value_error(self, tmp_path):
+    def test_unknown_mode_logs_error_and_does_not_raise(self, tmp_path, caplog):
         entry = {**self.BASE_ENTRY, "conditional": "telepathy"}
-        with pytest.raises(ValueError, match="Unknown conditional mode"):
-            fixed_fetch_packages([entry], tmp_path, {})
+        with caplog.at_level(logging.ERROR):
+            result = fixed_fetch_packages([entry], tmp_path, {})
+        assert result is False
+        assert any("Unknown conditional mode" in m for m in caplog.messages)
 
     def test_env_vars_expanded_in_url_and_filename(self, tmp_path):
         entry = {
@@ -841,6 +861,16 @@ class TestFixedUrlsFetchPackages:
         with patch.dict(fixed_urls._FETCH_MODES, {"last_modified": mock_fn}):
             assert fixed_fetch_packages(entries, tmp_path, {}) is False
 
+    def test_one_entry_failing_does_not_block_others(self, tmp_path, caplog):
+        entries = [self.BASE_ENTRY, {**self.BASE_ENTRY, "filename": "other.deb"}]
+        mock_fn = MagicMock(side_effect=[ConnectionError("boom"), True])
+        with patch.dict(fixed_urls._FETCH_MODES, {"last_modified": mock_fn}):
+            with caplog.at_level(logging.ERROR):
+                result = fixed_fetch_packages(entries, tmp_path, {})
+        assert result is True
+        assert mock_fn.call_count == 2
+        assert any("Failed to fetch" in m for m in caplog.messages)
+
 
 # ---------------------------------------------------------------------------
 # cli.PROVIDERS registry
@@ -880,6 +910,466 @@ class TestSetupLogging:
         with patch("local_apt_repo_updater.cli.logging.basicConfig") as mock_cfg:
             setup_logging(2)
             assert mock_cfg.call_args.kwargs["level"] == logging.DEBUG
+
+    def test_installs_color_formatter_on_handler(self):
+        with patch("local_apt_repo_updater.cli.logging.basicConfig") as mock_cfg:
+            setup_logging(0)
+            handler = mock_cfg.call_args.kwargs["handlers"][0]
+            assert isinstance(handler.formatter, cli.ColorFormatter)
+
+
+# ---------------------------------------------------------------------------
+# cli.use_color_output / cli.ColorFormatter
+# ---------------------------------------------------------------------------
+
+
+class TestUseColorOutput:
+    def test_true_when_tty_and_no_color_unset(self):
+        with (
+            patch("local_apt_repo_updater.cli.sys.stderr.isatty", return_value=True),
+            patch.dict(os.environ, {}, clear=False),
+        ):
+            os.environ.pop("NO_COLOR", None)
+            assert cli.use_color_output() is True
+
+    def test_false_when_not_a_tty(self):
+        with patch("local_apt_repo_updater.cli.sys.stderr.isatty", return_value=False):
+            assert cli.use_color_output() is False
+
+    def test_false_when_no_color_set(self):
+        with (
+            patch("local_apt_repo_updater.cli.sys.stderr.isatty", return_value=True),
+            patch.dict(os.environ, {"NO_COLOR": "1"}),
+        ):
+            assert cli.use_color_output() is False
+
+
+class TestColorFormatter:
+    def test_error_wrapped_in_red_when_color_enabled(self):
+        formatter = cli.ColorFormatter("%(levelname)s: %(message)s", use_color=True)
+        record = logging.LogRecord(
+            "test", logging.ERROR, __file__, 1, "boom", None, None
+        )
+        result = formatter.format(record)
+        assert result.startswith("\x1b[31m")
+        assert result.endswith("\x1b[0m")
+
+    def test_warning_wrapped_in_yellow_when_color_enabled(self):
+        formatter = cli.ColorFormatter("%(levelname)s: %(message)s", use_color=True)
+        record = logging.LogRecord(
+            "test", logging.WARNING, __file__, 1, "careful", None, None
+        )
+        result = formatter.format(record)
+        assert result.startswith("\x1b[33m")
+
+    def test_info_not_colored(self):
+        formatter = cli.ColorFormatter("%(levelname)s: %(message)s", use_color=True)
+        record = logging.LogRecord(
+            "test", logging.INFO, __file__, 1, "hello", None, None
+        )
+        assert formatter.format(record) == "INFO: hello"
+
+    def test_no_escape_codes_when_color_disabled(self):
+        formatter = cli.ColorFormatter("%(levelname)s: %(message)s", use_color=False)
+        record = logging.LogRecord(
+            "test", logging.ERROR, __file__, 1, "boom", None, None
+        )
+        assert formatter.format(record) == "ERROR: boom"
+
+
+# ---------------------------------------------------------------------------
+# cli.parse_args
+# ---------------------------------------------------------------------------
+
+
+class TestParseArgs:
+    def test_default_command_is_none(self):
+        with patch("local_apt_repo_updater.cli.sys.argv", ["prog"]):
+            args = cli.parse_args()
+        assert args.command is None
+
+    def test_install_apt_hook_defaults(self):
+        with patch("local_apt_repo_updater.cli.sys.argv", ["prog", "install-apt-hook"]):
+            args = cli.parse_args()
+        assert args.command == "install-apt-hook"
+        assert args.path == cli.DEFAULT_APT_HOOK_PATH
+        assert args.executable is None
+
+    def test_install_apt_hook_custom_path_and_executable(self):
+        with patch(
+            "local_apt_repo_updater.cli.sys.argv",
+            [
+                "prog",
+                "install-apt-hook",
+                "--path",
+                "/tmp/hook",
+                "--executable",
+                "/tmp/bin/local-apt-repo-updater",
+            ],
+        ):
+            args = cli.parse_args()
+        assert args.path == Path("/tmp/hook")
+        assert args.executable == Path("/tmp/bin/local-apt-repo-updater")
+
+    def test_install_sources_list_defaults(self):
+        with patch(
+            "local_apt_repo_updater.cli.sys.argv",
+            ["prog", "install-sources-list"],
+        ):
+            args = cli.parse_args()
+        assert args.command == "install-sources-list"
+        assert args.path == cli.DEFAULT_SOURCES_LIST_PATH
+        assert args.repo_dir is None
+        assert args.keyring == cli.DEFAULT_KEYRING_PATH
+
+    def test_install_sources_list_custom_path_and_repo_dir(self):
+        with patch(
+            "local_apt_repo_updater.cli.sys.argv",
+            [
+                "prog",
+                "install-sources-list",
+                "--path",
+                "/tmp/sources.list",
+                "--repo-dir",
+                "/tmp/repo",
+                "--keyring",
+                "/tmp/keyring.gpg",
+            ],
+        ):
+            args = cli.parse_args()
+        assert args.path == Path("/tmp/sources.list")
+        assert args.repo_dir == Path("/tmp/repo")
+        assert args.keyring == Path("/tmp/keyring.gpg")
+
+
+# ---------------------------------------------------------------------------
+# cli.detect_executable
+# ---------------------------------------------------------------------------
+
+
+class TestDetectExecutable:
+    def test_uses_argv0_when_not_a_python_script(self):
+        with patch(
+            "local_apt_repo_updater.cli.sys.argv",
+            ["/root/.local/bin/local-apt-repo-updater"],
+        ):
+            assert cli.detect_executable() == Path(
+                "/root/.local/bin/local-apt-repo-updater"
+            )
+
+    def test_falls_back_to_which_when_argv0_is_a_python_file(self):
+        with (
+            patch("local_apt_repo_updater.cli.sys.argv", ["cli.py"]),
+            patch(
+                "local_apt_repo_updater.cli.shutil.which",
+                return_value="/usr/local/bin/local-apt-repo-updater",
+            ),
+        ):
+            assert cli.detect_executable() == Path(
+                "/usr/local/bin/local-apt-repo-updater"
+            )
+
+    def test_falls_back_to_argv0_when_which_finds_nothing(self):
+        with (
+            patch("local_apt_repo_updater.cli.sys.argv", ["cli.py"]),
+            patch("local_apt_repo_updater.cli.shutil.which", return_value=None),
+        ):
+            assert cli.detect_executable() == Path("cli.py").resolve()
+
+
+# ---------------------------------------------------------------------------
+# cli.render_apt_hook / cli.install_apt_hook
+# ---------------------------------------------------------------------------
+
+
+class TestRenderAptHook:
+    def test_includes_pre_invoke_block_and_quoted_path(self):
+        content = cli.render_apt_hook(Path("/usr/bin/local-apt-repo-updater"))
+        assert "APT::Update::Pre-Invoke {" in content
+        assert '"/usr/bin/local-apt-repo-updater";' in content
+
+    def test_escapes_quotes_in_path(self):
+        content = cli.render_apt_hook(Path('/opt/weird"path/local-apt-repo-updater'))
+        assert '\\"path' in content
+
+
+class TestInstallAptHook:
+    def test_writes_hook_file(self, tmp_path):
+        hook_path = tmp_path / "apt.conf.d" / "99local-apt-repo-updater"
+        cli.install_apt_hook(hook_path, Path("/usr/bin/local-apt-repo-updater"))
+        content = hook_path.read_text()
+        assert "/usr/bin/local-apt-repo-updater" in content
+        assert "APT::Update::Pre-Invoke" in content
+
+    def test_creates_parent_directories(self, tmp_path):
+        hook_path = tmp_path / "nested" / "dir" / "hook"
+        cli.install_apt_hook(hook_path, Path("/usr/bin/local-apt-repo-updater"))
+        assert hook_path.exists()
+
+    def test_permission_error_raises_systemexit_with_guidance(self, tmp_path):
+        hook_path = tmp_path / "hook"
+        with patch.object(Path, "write_text", side_effect=PermissionError):
+            with pytest.raises(SystemExit, match="sudo local-apt-repo-updater"):
+                cli.install_apt_hook(hook_path, Path("/usr/bin/local-apt-repo-updater"))
+
+
+# ---------------------------------------------------------------------------
+# cli.resolve_apt_repo_dir
+# ---------------------------------------------------------------------------
+
+
+class TestResolveAptRepoDir:
+    def test_uses_configured_value(self):
+        with patch(
+            "local_apt_repo_updater.cli.load_config",
+            return_value={"apt_repo_directory": "/data/apt-repo"},
+        ):
+            assert cli.resolve_apt_repo_dir() == Path("/data/apt-repo")
+
+    def test_falls_back_to_default_when_key_missing(self):
+        with patch("local_apt_repo_updater.cli.load_config", return_value={}):
+            assert cli.resolve_apt_repo_dir() == cli.DEFAULT_APT_REPO_DIR
+
+    def test_falls_back_to_default_when_config_missing(self):
+        with patch(
+            "local_apt_repo_updater.cli.load_config", side_effect=FileNotFoundError
+        ):
+            assert cli.resolve_apt_repo_dir() == cli.DEFAULT_APT_REPO_DIR
+
+
+# ---------------------------------------------------------------------------
+# cli.check_repo_dir_permissions
+# ---------------------------------------------------------------------------
+
+
+class TestCheckRepoDirPermissions:
+    @staticmethod
+    def _stat(uid, mode):
+        return MagicMock(st_uid=uid, st_mode=mode)
+
+    def test_passes_for_root_owned_non_writable_dir(self, tmp_path):
+        with patch.object(Path, "stat", return_value=self._stat(0, 0o040755)):
+            cli.check_repo_dir_permissions(tmp_path)  # must not raise
+
+    def test_passes_for_root_owned_private_dir(self, tmp_path):
+        with patch.object(Path, "stat", return_value=self._stat(0, 0o040700)):
+            cli.check_repo_dir_permissions(tmp_path)  # must not raise
+
+    def test_raises_when_not_owned_by_root(self, tmp_path):
+        with patch.object(Path, "stat", return_value=self._stat(1000, 0o040755)):
+            with pytest.raises(cli.InsecureRepoDirectoryError, match="root"):
+                cli.check_repo_dir_permissions(tmp_path)
+
+    def test_raises_when_group_writable(self, tmp_path):
+        with patch.object(Path, "stat", return_value=self._stat(0, 0o040775)):
+            with pytest.raises(cli.InsecureRepoDirectoryError, match="writable"):
+                cli.check_repo_dir_permissions(tmp_path)
+
+    def test_raises_when_world_writable(self, tmp_path):
+        with patch.object(Path, "stat", return_value=self._stat(0, 0o040757)):
+            with pytest.raises(cli.InsecureRepoDirectoryError, match="writable"):
+                cli.check_repo_dir_permissions(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# cli.render_sources_list / cli.install_sources_list
+# ---------------------------------------------------------------------------
+
+
+class TestRenderSourcesList:
+    def test_includes_signed_by_file_uri(self):
+        content = cli.render_sources_list(
+            Path("/srv/local-apt-repo"), Path("/etc/apt/keyrings/x.gpg")
+        )
+        assert content == (
+            "deb [signed-by=/etc/apt/keyrings/x.gpg] file:///srv/local-apt-repo ./\n"
+        )
+
+
+class TestInstallSourcesList:
+    def test_writes_sources_list_file(self, tmp_path):
+        list_path = tmp_path / "sources.list.d" / "local-apt-repo-updater.list"
+        keyring_path = tmp_path / "keyring.gpg"
+        with (
+            patch("local_apt_repo_updater.signing.ensure_signing_key"),
+            patch("local_apt_repo_updater.signing.export_public_key"),
+        ):
+            cli.install_sources_list(
+                list_path, Path("/srv/local-apt-repo"), keyring_path
+            )
+        content = list_path.read_text()
+        assert "file:///srv/local-apt-repo" in content
+        assert f"signed-by={keyring_path}" in content
+
+    def test_creates_parent_directories(self, tmp_path):
+        list_path = tmp_path / "nested" / "dir" / "sources.list"
+        keyring_path = tmp_path / "keyring.gpg"
+        with (
+            patch("local_apt_repo_updater.signing.ensure_signing_key"),
+            patch("local_apt_repo_updater.signing.export_public_key"),
+        ):
+            cli.install_sources_list(
+                list_path, Path("/srv/local-apt-repo"), keyring_path
+            )
+        assert list_path.exists()
+
+    def test_ensures_signing_key_and_exports_it(self, tmp_path):
+        list_path = tmp_path / "sources.list"
+        keyring_path = tmp_path / "keyring.gpg"
+        with (
+            patch("local_apt_repo_updater.signing.ensure_signing_key") as mock_ensure,
+            patch("local_apt_repo_updater.signing.export_public_key") as mock_export,
+        ):
+            cli.install_sources_list(
+                list_path, Path("/srv/local-apt-repo"), keyring_path
+            )
+        mock_ensure.assert_called_once_with(cli.DEFAULT_GNUPG_HOME)
+        mock_export.assert_called_once_with(cli.DEFAULT_GNUPG_HOME, keyring_path)
+
+    def test_permission_error_raises_systemexit_with_guidance(self, tmp_path):
+        list_path = tmp_path / "sources.list"
+        keyring_path = tmp_path / "keyring.gpg"
+        with (
+            patch("local_apt_repo_updater.signing.ensure_signing_key"),
+            patch("local_apt_repo_updater.signing.export_public_key"),
+            patch.object(Path, "write_text", side_effect=PermissionError),
+        ):
+            with pytest.raises(SystemExit, match="sudo local-apt-repo-updater"):
+                cli.install_sources_list(
+                    list_path, Path("/srv/local-apt-repo"), keyring_path
+                )
+
+    def test_skips_permission_check_when_repo_dir_does_not_exist_yet(self, tmp_path):
+        repo_dir = tmp_path / "does-not-exist-yet"
+        list_path = tmp_path / "sources.list"
+        keyring_path = tmp_path / "keyring.gpg"
+        with (
+            patch("local_apt_repo_updater.signing.ensure_signing_key"),
+            patch("local_apt_repo_updater.signing.export_public_key"),
+        ):
+            cli.install_sources_list(list_path, repo_dir, keyring_path)  # no raise
+        assert list_path.exists()
+
+    def test_refuses_when_existing_repo_dir_is_insecure(self, tmp_path):
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        list_path = tmp_path / "sources.list"
+        keyring_path = tmp_path / "keyring.gpg"
+        with (
+            patch("local_apt_repo_updater.signing.ensure_signing_key"),
+            patch("local_apt_repo_updater.signing.export_public_key"),
+            patch.object(
+                Path, "stat", return_value=MagicMock(st_uid=1000, st_mode=0o040755)
+            ),
+        ):
+            with pytest.raises(SystemExit, match="root"):
+                cli.install_sources_list(list_path, repo_dir, keyring_path)
+        assert not list_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# signing._has_secret_key
+# ---------------------------------------------------------------------------
+
+
+class TestHasSecretKey:
+    def test_true_when_sec_line_present(self, tmp_path):
+        with patch(
+            "local_apt_repo_updater.signing.subprocess.run",
+            return_value=MagicMock(stdout="sec:u:4096:1:ABCDEF0123456789:\n"),
+        ):
+            assert signing._has_secret_key(tmp_path) is True
+
+    def test_false_when_no_sec_line(self, tmp_path):
+        with patch(
+            "local_apt_repo_updater.signing.subprocess.run",
+            return_value=MagicMock(stdout=""),
+        ):
+            assert signing._has_secret_key(tmp_path) is False
+
+
+# ---------------------------------------------------------------------------
+# signing.ensure_signing_key
+# ---------------------------------------------------------------------------
+
+
+class TestEnsureSigningKey:
+    def test_creates_gnupg_home_with_restrictive_permissions(self, tmp_path):
+        gnupg_home = tmp_path / "gnupg"
+        with patch("local_apt_repo_updater.signing._has_secret_key", return_value=True):
+            signing.ensure_signing_key(gnupg_home)
+        assert gnupg_home.is_dir()
+        assert (gnupg_home.stat().st_mode & 0o777) == 0o700
+
+    def test_skips_generation_when_key_exists(self, tmp_path):
+        gnupg_home = tmp_path / "gnupg"
+        with (
+            patch("local_apt_repo_updater.signing._has_secret_key", return_value=True),
+            patch("local_apt_repo_updater.signing.subprocess.run") as mock_run,
+        ):
+            signing.ensure_signing_key(gnupg_home)
+        mock_run.assert_not_called()
+
+    def test_generates_key_when_missing(self, tmp_path):
+        gnupg_home = tmp_path / "gnupg"
+        with (
+            patch("local_apt_repo_updater.signing._has_secret_key", return_value=False),
+            patch("local_apt_repo_updater.signing.subprocess.run") as mock_run,
+        ):
+            signing.ensure_signing_key(gnupg_home)
+        mock_run.assert_called_once()
+        called_cmd = mock_run.call_args.args[0]
+        assert called_cmd == [
+            "gpg",
+            "--homedir",
+            str(gnupg_home),
+            "--batch",
+            "--gen-key",
+        ]
+        assert mock_run.call_args.kwargs["check"] is True
+        assert "%no-protection" in mock_run.call_args.kwargs["input"]
+
+
+# ---------------------------------------------------------------------------
+# signing.export_public_key
+# ---------------------------------------------------------------------------
+
+
+class TestExportPublicKey:
+    def test_creates_parent_dir_and_calls_gpg_export(self, tmp_path):
+        gnupg_home = tmp_path / "gnupg"
+        dest = tmp_path / "keyrings" / "repo.gpg"
+        with patch("local_apt_repo_updater.signing.subprocess.check_call") as mock_call:
+            signing.export_public_key(gnupg_home, dest)
+        assert dest.parent.is_dir()
+        mock_call.assert_called_once_with(
+            ["gpg", "--homedir", str(gnupg_home), "--output", str(dest), "--export"]
+        )
+
+
+# ---------------------------------------------------------------------------
+# signing.sign_release
+# ---------------------------------------------------------------------------
+
+
+class TestSignRelease:
+    def test_clearsigns_and_detach_signs(self, tmp_path):
+        gnupg_home = tmp_path / "gnupg"
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        with patch("local_apt_repo_updater.signing.subprocess.check_call") as mock_call:
+            signing.sign_release(gnupg_home, repo_dir)
+
+        commands = [c.args[0] for c in mock_call.call_args_list]
+        assert len(commands) == 2
+
+        clearsign_cmd = next(cmd for cmd in commands if "--clearsign" in cmd)
+        assert str(repo_dir / "InRelease") in clearsign_cmd
+        assert str(repo_dir / "Release") in clearsign_cmd
+
+        detach_cmd = next(cmd for cmd in commands if "--detach-sign" in cmd)
+        assert str(repo_dir / "Release.gpg") in detach_cmd
+        assert str(repo_dir / "Release") in detach_cmd
 
 
 # ---------------------------------------------------------------------------
@@ -924,6 +1414,10 @@ class TestMain:
             patch(
                 "local_apt_repo_updater.cli.subprocess.check_call"
             ) as mock_check_call,
+            patch("local_apt_repo_updater.signing.ensure_signing_key"),
+            patch("local_apt_repo_updater.signing.sign_release"),
+            patch("local_apt_repo_updater.signing.export_public_key"),
+            patch("local_apt_repo_updater.cli.check_repo_dir_permissions"),
         ):
             main()
 
@@ -937,6 +1431,7 @@ class TestMain:
     def test_no_rebuild_when_providers_unchanged_and_metadata_exists(self, tmp_path):
         (tmp_path / "Packages").write_text("")
         (tmp_path / "Release").write_text("")
+        (tmp_path / "InRelease").write_text("")
         mock_check_call = self._run_main(tmp_path)
         mock_check_call.assert_not_called()
 
@@ -962,6 +1457,102 @@ class TestMain:
         mock_check_call = self._run_main(tmp_path)
         mock_check_call.assert_called()
 
+    def test_rebuild_triggered_when_inrelease_file_missing(self, tmp_path):
+        (tmp_path / "Packages").write_text("")
+        (tmp_path / "Release").write_text("")
+        # InRelease does not exist
+        mock_check_call = self._run_main(tmp_path)
+        mock_check_call.assert_called()
+
+    def test_rebuild_signs_release(self, tmp_path):
+        fake_args = MagicMock(verbose=0, command=None)
+        mock_gh_fetch = MagicMock(return_value=True)
+
+        with (
+            patch("local_apt_repo_updater.cli.parse_args", return_value=fake_args),
+            patch("local_apt_repo_updater.cli.setup_logging"),
+            patch(
+                "local_apt_repo_updater.cli.load_config",
+                return_value={"apt_repo_directory": str(tmp_path)},
+            ),
+            patch(
+                "local_apt_repo_updater.cli.platform.freedesktop_os_release",
+                return_value={},
+            ),
+            patch.dict(cli.PROVIDERS, {"github_releases": mock_gh_fetch}, clear=True),
+            patch("local_apt_repo_updater.cli.subprocess.check_call"),
+            patch("local_apt_repo_updater.signing.ensure_signing_key") as mock_ensure,
+            patch("local_apt_repo_updater.signing.sign_release") as mock_sign,
+            patch("local_apt_repo_updater.signing.export_public_key") as mock_export,
+            patch("local_apt_repo_updater.cli.check_repo_dir_permissions"),
+        ):
+            main()
+
+        mock_ensure.assert_called_once_with(cli.DEFAULT_GNUPG_HOME)
+        mock_sign.assert_called_once_with(cli.DEFAULT_GNUPG_HOME, tmp_path)
+        mock_export.assert_called_once_with(
+            cli.DEFAULT_GNUPG_HOME, cli.DEFAULT_KEYRING_PATH
+        )
+
+    def test_refuses_and_does_nothing_when_repo_dir_is_insecure(self, tmp_path):
+        (tmp_path / "Packages").write_text("")
+        with (
+            patch.object(
+                Path, "stat", return_value=MagicMock(st_uid=1000, st_mode=0o040755)
+            ),
+            patch("local_apt_repo_updater.cli.subprocess.check_call") as mock_call,
+            patch("local_apt_repo_updater.signing.sign_release") as mock_sign,
+        ):
+            with pytest.raises(cli.InsecureRepoDirectoryError, match="root"):
+                cli.run_update({"apt_repo_directory": str(tmp_path)})
+        mock_call.assert_not_called()
+        mock_sign.assert_not_called()
+
+    def test_insecure_repo_dir_is_logged_and_does_not_crash_main(
+        self, tmp_path, caplog
+    ):
+        fake_args = MagicMock(verbose=0, command=None)
+
+        with (
+            patch("local_apt_repo_updater.cli.parse_args", return_value=fake_args),
+            patch("local_apt_repo_updater.cli.setup_logging"),
+            patch(
+                "local_apt_repo_updater.cli.load_config",
+                return_value={"apt_repo_directory": str(tmp_path)},
+            ),
+            patch.object(
+                Path, "stat", return_value=MagicMock(st_uid=1000, st_mode=0o040755)
+            ),
+        ):
+            with caplog.at_level(logging.ERROR):
+                main()  # must not raise
+
+        assert any("local-apt-repo-updater failed" in m for m in caplog.messages)
+
+    def test_freshly_created_repo_dir_gets_safe_mode_regardless_of_umask(
+        self, tmp_path
+    ):
+        new_dir = tmp_path / "new-repo"
+        old_umask = os.umask(0)
+        try:
+            with (
+                patch("local_apt_repo_updater.cli.check_repo_dir_permissions"),
+                patch.dict(cli.PROVIDERS, {}, clear=True),
+                patch("local_apt_repo_updater.cli.subprocess.check_call"),
+                patch("local_apt_repo_updater.signing.ensure_signing_key"),
+                patch("local_apt_repo_updater.signing.sign_release"),
+                patch("local_apt_repo_updater.signing.export_public_key"),
+                patch(
+                    "local_apt_repo_updater.cli.platform.freedesktop_os_release",
+                    return_value={},
+                ),
+            ):
+                cli.run_update({"apt_repo_directory": str(new_dir)})
+        finally:
+            os.umask(old_umask)
+
+        assert (new_dir.stat().st_mode & 0o777) == 0o755
+
     def test_rebuild_calls_apt_ftparchive_packages(self, tmp_path):
         mock_check_call = self._run_main(
             tmp_path,
@@ -985,6 +1576,7 @@ class TestMain:
     def test_providers_receive_config_entries_and_env(self, tmp_path):
         (tmp_path / "Packages").write_text("")
         (tmp_path / "Release").write_text("")
+        (tmp_path / "InRelease").write_text("")
         entries = [{"repo": "https://github.com/owner/repo", "filename": "pkg.deb"}]
         fake_env = {"VERSION_ID": "22.04"}
         fake_args = MagicMock(verbose=0)
@@ -1013,6 +1605,7 @@ class TestMain:
                 clear=True,
             ),
             patch("local_apt_repo_updater.cli.subprocess.check_call"),
+            patch("local_apt_repo_updater.cli.check_repo_dir_permissions"),
         ):
             main()
 
@@ -1021,6 +1614,7 @@ class TestMain:
     def test_provider_skipped_when_config_has_no_entries(self, tmp_path):
         (tmp_path / "Packages").write_text("")
         (tmp_path / "Release").write_text("")
+        (tmp_path / "InRelease").write_text("")
         fake_args = MagicMock(verbose=0)
         mock_gh_fetch = MagicMock(return_value=False)
 
@@ -1038,10 +1632,105 @@ class TestMain:
             ),
             patch.dict(cli.PROVIDERS, {"github_releases": mock_gh_fetch}, clear=True),
             patch("local_apt_repo_updater.cli.subprocess.check_call"),
+            patch("local_apt_repo_updater.cli.check_repo_dir_permissions"),
         ):
             main()
 
         mock_gh_fetch.assert_not_called()
+
+    def test_install_apt_hook_command_skips_update_and_writes_hook(self, tmp_path):
+        hook_path = tmp_path / "hook"
+        fake_args = MagicMock(
+            verbose=0, command="install-apt-hook", path=hook_path, executable=None
+        )
+
+        with (
+            patch("local_apt_repo_updater.cli.parse_args", return_value=fake_args),
+            patch("local_apt_repo_updater.cli.setup_logging"),
+            patch(
+                "local_apt_repo_updater.cli.detect_executable",
+                return_value=Path("/usr/bin/local-apt-repo-updater"),
+            ),
+            patch("local_apt_repo_updater.cli.load_config") as mock_load_config,
+        ):
+            main()
+
+        mock_load_config.assert_not_called()
+        assert "/usr/bin/local-apt-repo-updater" in hook_path.read_text()
+
+    def test_install_sources_list_command_skips_update_and_writes_file(self, tmp_path):
+        list_path = tmp_path / "sources.list"
+        keyring_path = tmp_path / "keyring.gpg"
+        fake_args = MagicMock(
+            verbose=0,
+            command="install-sources-list",
+            path=list_path,
+            repo_dir=Path("/srv/local-apt-repo"),
+            keyring=keyring_path,
+        )
+
+        with (
+            patch("local_apt_repo_updater.cli.parse_args", return_value=fake_args),
+            patch("local_apt_repo_updater.cli.setup_logging"),
+            patch("local_apt_repo_updater.cli.load_config") as mock_load_config,
+            patch(
+                "local_apt_repo_updater.cli.subprocess.check_call"
+            ) as mock_check_call,
+            patch("local_apt_repo_updater.signing.ensure_signing_key") as mock_ensure,
+            patch("local_apt_repo_updater.signing.export_public_key") as mock_export,
+        ):
+            main()
+
+        mock_load_config.assert_not_called()
+        mock_check_call.assert_not_called()
+        mock_ensure.assert_called_once_with(cli.DEFAULT_GNUPG_HOME)
+        mock_export.assert_called_once_with(cli.DEFAULT_GNUPG_HOME, keyring_path)
+        assert "file:///srv/local-apt-repo" in list_path.read_text()
+        assert f"signed-by={keyring_path}" in list_path.read_text()
+
+    def test_missing_apt_repo_directory_falls_back_to_default(self, tmp_path):
+        fake_args = MagicMock(verbose=0, command=None)
+        default_dir = tmp_path / "default-repo"
+
+        with (
+            patch("local_apt_repo_updater.cli.parse_args", return_value=fake_args),
+            patch("local_apt_repo_updater.cli.setup_logging"),
+            patch("local_apt_repo_updater.cli.load_config", return_value={}),
+            patch("local_apt_repo_updater.cli.DEFAULT_APT_REPO_DIR", default_dir),
+            patch(
+                "local_apt_repo_updater.cli.platform.freedesktop_os_release",
+                return_value={},
+            ),
+            patch.dict(
+                cli.PROVIDERS,
+                {"github_releases": MagicMock(return_value=False)},
+                clear=True,
+            ),
+            patch("local_apt_repo_updater.cli.subprocess.check_call"),
+            patch("local_apt_repo_updater.signing.ensure_signing_key"),
+            patch("local_apt_repo_updater.signing.sign_release"),
+            patch("local_apt_repo_updater.signing.export_public_key"),
+            patch("local_apt_repo_updater.cli.check_repo_dir_permissions"),
+        ):
+            main()
+
+        assert default_dir.exists()
+
+    def test_unexpected_failure_is_logged_and_does_not_raise(self, caplog):
+        fake_args = MagicMock(verbose=0, command=None)
+
+        with (
+            patch("local_apt_repo_updater.cli.parse_args", return_value=fake_args),
+            patch("local_apt_repo_updater.cli.setup_logging"),
+            patch(
+                "local_apt_repo_updater.cli.load_config",
+                side_effect=RuntimeError("network is down"),
+            ),
+        ):
+            with caplog.at_level(logging.ERROR):
+                main()  # must not raise
+
+        assert any("local-apt-repo-updater failed" in m for m in caplog.messages)
 
 
 # ---------------------------------------------------------------------------
@@ -1424,6 +2113,22 @@ class TestApacheDirectoryFetchPackages:
             ),
         ):
             assert fetch_packages(entries, tmp_path, {}) is True
+
+    def test_one_entry_failing_does_not_block_others(self, tmp_path, caplog):
+        from local_apt_repo_updater.apache_directory import fetch_packages
+
+        entries = [self.BASE_ENTRY, {**self.BASE_ENTRY, "filename": "other_*_all.deb"}]
+        with (
+            patch(
+                "local_apt_repo_updater.apache_directory.find_newest_deb",
+                side_effect=[ConnectionError("boom"), "other_1.0.0_all.deb"],
+            ),
+            self._patch_fetch(True),
+        ):
+            with caplog.at_level(logging.ERROR):
+                result = fetch_packages(entries, tmp_path, {})
+        assert result is True
+        assert any("Failed to process" in m for m in caplog.messages)
 
     def test_filename_list_fetches_each_pattern(self, tmp_path):
         from local_apt_repo_updater.apache_directory import fetch_packages
