@@ -4,21 +4,48 @@ build-backend = "hatchling.build"
 
 [project]
 name = "local-apt-repo-updater"
-version = "0.1.0"
+version = "0.2.0"
 description = "Tool to fetch remote .deb files and create a local APT repo from them"
 dependencies = ["requests", "PyYAML", "platformdirs"]
 readme = "README.md"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE.txt"]
+authors = [
+    { name = "Gene Wood", email = "gene_wood@public.cementhorizon.com" },
+]
+maintainers = [
+    { name = "Gene Wood", email = "gene_wood@public.cementhorizon.com" },
+]
 requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
 
 [project.urls]
 "Homepage" = "https://github.com/gene1wood/local-apt-repo-updater"
-"Bug Reports" = "https://github.com/gene1wood/local-apt-repo-updater/issues"
-"Say Thanks!" = "https://saythanks.io/to/gene1wood"
+"Repository" = "https://github.com/gene1wood/local-apt-repo-updater"
 "Source" = "https://github.com/gene1wood/local-apt-repo-updater"
+"Documentation" = "https://github.com/gene1wood/local-apt-repo-updater#readme"
+"Changelog" = "https://github.com/gene1wood/local-apt-repo-updater/blob/main/CHANGELOG.md"
+"Bug Reports" = "https://github.com/gene1wood/local-apt-repo-updater/issues"
+"Funding" = "https://github.com/sponsors/gene1wood"
+"Say Thanks!" = "https://saythanks.io/to/gene1wood"
 
 [project.scripts]
 local-apt-repo-updater = "local_apt_repo_updater.cli:main"
 
-[tool.black]
-preview = true
-unstable = true
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

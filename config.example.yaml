@@ -2,6 +2,11 @@ apt_repo_directory: /path/to/apt/repo
 github_releases:
 - repo: https://github.com/example/project
   filename: example-{APP_VERSION}.deb
+- repo: https://github.com/example/unpredictable-filename-project
+  filename: "project_{APP_VERSION}-*_amd64.deb"
+- repo: https://github.com/example/prerelease-happy-project
+  filename: project_{APP_VERSION}_amd64.deb
+  use_latest_tag: false
 fixed_urls:
 - url: https://example.com/downloads
   filename: example.deb
@@ -9,3 +14,13 @@ fixed_urls:
 - url: https://no-lastmodified-headers.example.net/linux/repo/ubuntu_{VERSION_ID}/amd64
   filename: example_{VERSION_ID}_amd64.deb
   conditional: content_length
+apache_directory:
+- url: https://repo.example.com/debian/dists/stable/main/binary-all/
+  filename: "example-package_*_all.deb"
+- url: https://repo.example.com/debian/dists/stable/main/binary-all/
+  filename:
+  - "example-package-a_*_all.deb"
+  - "example-package-b_*_all.deb"
+- version_url: https://downloads.cinc.sh/files/stable/cinc/
+  url: "https://downloads.cinc.sh/files/stable/cinc/{APP_VERSION}/ubuntu/{VERSION_ID}/"
+  filename: "cinc_{APP_VERSION}-*_amd64.deb"
