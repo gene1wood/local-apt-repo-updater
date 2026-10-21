@@ -59,12 +59,28 @@ def export_public_key(gnupg_home: Path, dest: Path) -> None:
     Export the signing key's public half as a binary keyring, for use with
     apt's ``signed-by=`` sources.list option.
 
+    The key is passphrase-less and never expires (see ``ensure_signing_key``),
+    so its exported public half never changes; skip re-exporting if ``dest``
+    already exists rather than re-running gpg on every repo rebuild.
+
     :param gnupg_home: Dedicated GNUPGHOME directory holding the signing key.
     :param dest: Path to write the exported public keyring to.
     """
+    if dest.exists():
+        return
+
     dest.parent.mkdir(parents=True, exist_ok=True)
     subprocess.check_call(
-        ["gpg", "--homedir", str(gnupg_home), "--output", str(dest), "--export"]
+        [
+            "gpg",
+            "--homedir",
+            str(gnupg_home),
+            "--batch",
+            "--yes",
+            "--output",
+            str(dest),
+            "--export",
+        ]
     )
 
 

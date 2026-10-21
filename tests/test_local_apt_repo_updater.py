@@ -1439,8 +1439,27 @@ class TestExportPublicKey:
             signing.export_public_key(gnupg_home, dest)
         assert dest.parent.is_dir()
         mock_call.assert_called_once_with(
-            ["gpg", "--homedir", str(gnupg_home), "--output", str(dest), "--export"]
+            [
+                "gpg",
+                "--homedir",
+                str(gnupg_home),
+                "--batch",
+                "--yes",
+                "--output",
+                str(dest),
+                "--export",
+            ]
         )
+
+    def test_skips_export_if_dest_already_exists(self, tmp_path):
+        gnupg_home = tmp_path / "gnupg"
+        dest = tmp_path / "keyrings" / "repo.gpg"
+        dest.parent.mkdir(parents=True)
+        dest.write_bytes(b"existing keyring")
+        with patch("local_apt_repo_updater.signing.subprocess.check_call") as mock_call:
+            signing.export_public_key(gnupg_home, dest)
+        mock_call.assert_not_called()
+        assert dest.read_bytes() == b"existing keyring"
 
 
 # ---------------------------------------------------------------------------
