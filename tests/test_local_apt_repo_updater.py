@@ -1114,6 +1114,102 @@ class TestInstallAptHook:
 
 
 # ---------------------------------------------------------------------------
+# cli.load_config
+# ---------------------------------------------------------------------------
+
+
+class TestLoadConfig:
+    @staticmethod
+    def _patch_xdg_config_path(tmp_path):
+        return patch(
+            "local_apt_repo_updater.cli.xdg_config_path",
+            return_value=tmp_path / "config.yaml",
+        )
+
+    def test_raises_filenotfounderror_when_nothing_exists(self, tmp_path):
+        with self._patch_xdg_config_path(tmp_path):
+            with pytest.raises(FileNotFoundError):
+                cli.load_config()
+
+    def test_loads_main_config_only(self, tmp_path):
+        (tmp_path / "config.yaml").write_text("apt_repo_directory: /data/apt-repo\n")
+        with self._patch_xdg_config_path(tmp_path):
+            assert cli.load_config() == {"apt_repo_directory": "/data/apt-repo"}
+
+    def test_config_d_without_main_config_works(self, tmp_path):
+        config_d = tmp_path / "config.d"
+        config_d.mkdir()
+        (config_d / "10-example.yaml").write_text(
+            "fixed_urls:\n- url: https://example.com\n  filename: example.deb\n"
+        )
+        with self._patch_xdg_config_path(tmp_path):
+            config = cli.load_config()
+        assert config == {
+            "fixed_urls": [{"url": "https://example.com", "filename": "example.deb"}]
+        }
+
+    def test_merges_provider_lists_across_files_without_affecting_each_other(
+        self, tmp_path
+    ):
+        (tmp_path / "config.yaml").write_text(
+            "fixed_urls:\n- url: https://main.example.com\n  filename: main.deb\n"
+        )
+        config_d = tmp_path / "config.d"
+        config_d.mkdir()
+        (config_d / "10-first.yaml").write_text(
+            "fixed_urls:\n- url: https://first.example.com\n  filename: first.deb\n"
+        )
+        (config_d / "20-second.yaml").write_text(
+            "fixed_urls:\n- url: https://second.example.com\n  filename: second.deb\n"
+        )
+        with self._patch_xdg_config_path(tmp_path):
+            config = cli.load_config()
+        assert [entry["filename"] for entry in config["fixed_urls"]] == [
+            "main.deb",
+            "first.deb",
+            "second.deb",
+        ]
+
+    def test_config_d_loaded_in_sorted_filename_order(self, tmp_path):
+        config_d = tmp_path / "config.d"
+        config_d.mkdir()
+        (config_d / "20-second.yaml").write_text(
+            "fixed_urls:\n- url: https://second.example.com\n  filename: second.deb\n"
+        )
+        (config_d / "10-first.yml").write_text(
+            "fixed_urls:\n- url: https://first.example.com\n  filename: first.deb\n"
+        )
+        with self._patch_xdg_config_path(tmp_path):
+            config = cli.load_config()
+        assert [entry["filename"] for entry in config["fixed_urls"]] == [
+            "first.deb",
+            "second.deb",
+        ]
+
+    def test_scalar_key_last_loaded_file_wins(self, tmp_path):
+        (tmp_path / "config.yaml").write_text("apt_repo_directory: /from/main\n")
+        config_d = tmp_path / "config.d"
+        config_d.mkdir()
+        (config_d / "10-override.yaml").write_text(
+            "apt_repo_directory: /from/config.d\n"
+        )
+        with self._patch_xdg_config_path(tmp_path):
+            config = cli.load_config()
+        assert config["apt_repo_directory"] == "/from/config.d"
+
+    def test_ignores_non_yaml_files_in_config_d(self, tmp_path):
+        config_d = tmp_path / "config.d"
+        config_d.mkdir()
+        (config_d / "README.md").write_text("not yaml\n")
+        (config_d / "10-example.yaml").write_text(
+            "fixed_urls:\n- url: https://example.com\n  filename: example.deb\n"
+        )
+        with self._patch_xdg_config_path(tmp_path):
+            config = cli.load_config()
+        assert len(config["fixed_urls"]) == 1
+
+
+# ---------------------------------------------------------------------------
 # cli.resolve_apt_repo_dir
 # ---------------------------------------------------------------------------
 

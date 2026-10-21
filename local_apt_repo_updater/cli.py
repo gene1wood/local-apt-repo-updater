@@ -84,10 +84,68 @@ def xdg_config_path() -> Path:
     return Path(user_config_dir(appname="local-apt-repo-updater")) / "config.yaml"
 
 
+def config_d_path() -> Path:
+    """
+    :returns: The ``config.d`` drop-in directory alongside
+        :func:`xdg_config_path`, following the ``name.d/`` convention used by
+        ``sudoers.d``, ``cron.d``, and similar.
+    """
+    return xdg_config_path().parent / "config.d"
+
+
+def _merge_config_fragment(config: dict, fragment: dict) -> None:
+    """
+    Merge ``fragment`` into ``config`` in place.
+
+    Provider keys (``github_releases``, ``fixed_urls``, ``apache_directory``)
+    are list-valued, so each file's entries are appended to the accumulated
+    list rather than replacing it - this is what lets separate config.d files
+    each add their own packages without affecting one another. Any other key
+    (e.g. ``apt_repo_directory``) is a plain scalar override, last file wins.
+
+    :param config: Accumulated configuration, updated in place.
+    :param fragment: Parsed contents of one config.yaml or config.d file.
+    """
+    for key, value in fragment.items():
+        if key in PROVIDERS:
+            config.setdefault(key, []).extend(value)
+        else:
+            config[key] = value
+
+
 def load_config() -> dict:
-    logger.debug(f"Loading configuration from {xdg_config_path()}")
-    with open(xdg_config_path()) as f:
-        return yaml.safe_load(f)
+    """
+    Load config.yaml and merge in any config.d/*.yaml drop-ins, in sorted
+    filename order, on top of it.
+
+    :returns: Merged configuration.
+    :raises FileNotFoundError: If neither config.yaml nor config.d exists.
+    """
+    config: dict = {}
+    found = False
+
+    main_path = xdg_config_path()
+    if main_path.exists():
+        logger.debug(f"Loading configuration from {main_path}")
+        with open(main_path) as f:
+            _merge_config_fragment(config, yaml.safe_load(f) or {})
+        found = True
+
+    d_path = config_d_path()
+    if d_path.is_dir():
+        fragment_paths = sorted(
+            p for p in d_path.iterdir() if p.is_file() and p.suffix in (".yaml", ".yml")
+        )
+        for fragment_path in fragment_paths:
+            logger.debug(f"Loading configuration fragment from {fragment_path}")
+            with open(fragment_path) as f:
+                _merge_config_fragment(config, yaml.safe_load(f) or {})
+            found = True
+
+    if not found:
+        raise FileNotFoundError(f"No configuration found at {main_path} or {d_path}")
+
+    return config
 
 
 def detect_executable() -> Path:

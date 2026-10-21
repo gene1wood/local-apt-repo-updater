@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.2.0]
+
+### Added
+
+- `config.d` drop-in directory: package entries can be split across separate files next to
+  config.yaml (e.g. `config.d/10-example.yaml`), following the same `name.d/` convention as
+  `sudoers.d` and `cron.d`. Provider lists are merged across config.yaml and every `config.d` file,
+  in sorted filename order, so one file's packages never affect another's; config.yaml itself is
+  now optional once config.d is in use.
+
 ## [1.1.0]
 
 ### Added

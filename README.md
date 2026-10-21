@@ -35,6 +35,21 @@ If XDG_CONFIG_HOME is not set:
 
 `~/.config/local-apt-repo-updater/config.yaml`
 
+### Drop-in files
+
+Package entries can also be split across separate files in a `config.d` directory next to
+`config.yaml`, e.g. `~/.config/local-apt-repo-updater/config.d/`, following the same `name.d/`
+convention as `sudoers.d` or `cron.d`. `config.yaml` itself is optional once `config.d` is in use.
+
+Every `*.yaml`/`*.yml` file directly inside `config.d` is loaded, in sorted filename order, after
+`config.yaml`. Each file is a normal config document using the same `github_releases`,
+`fixed_urls`, and `apache_directory` keys as `config.yaml`. Entries from every file are appended
+together, so one file's packages never affect another's. This makes it easy to keep, say, each
+package's configuration in its own file (`10-example.yaml`, `20-cinc.yaml`, ...), add or remove one
+without touching the rest, or drop a file in from a package's own install step. Scalar settings
+like `apt_repo_directory` are plain overrides instead: if set in more than one file, the
+last one loaded (by sorted filename) wins.
+
 ---
 
 ### Template variables
@@ -149,7 +164,7 @@ or
 ### Running automatically before `apt update`
 
 `local-apt-repo-updater` can install itself as an [`APT::Update::Pre-Invoke`](https://manpages.ubuntu.com/manpages/noble/man5/apt.conf.5.html)
-hook so that it runs — and the local repo's metadata is refreshed — every time `apt update` runs,
+hook so that it runs (and the local repo's metadata is refreshed) every time `apt update` runs,
 and can also add the `sources.list.d` entry apt needs to actually consume that repo:
 
 ```bash
@@ -188,28 +203,28 @@ Both commands must be run as root (e.g. via `sudo`), since `/etc/apt/` is not wr
 A few things to check for this to work correctly:
 
 - **Config file location**: `apt update` normally runs as root, and `sudo` resets `$HOME` to
-  `/root` by default, so the config must live at `/root/.config/local-apt-repo-updater/config.yaml`
-  (or wherever `$XDG_CONFIG_HOME` resolves to for root), not the invoking user's own config
-  directory.
+  `/root` by default, so the config (and any `config.d` drop-ins) must live under
+  `/root/.config/local-apt-repo-updater/` (or wherever `$XDG_CONFIG_HOME` resolves to for root),
+  not the invoking user's own config directory.
 - **`apt-ftparchive`/`gpg` on root's `PATH`**: the hook runs with whatever `PATH` the `apt update`
   invocation has, which may be more restrictive than an interactive login shell's `PATH` (e.g. a
   `sudoers` `secure_path`, or a cron/unattended-upgrades environment). Confirm `apt-ftparchive` and
   `gpg` are both reachable from there, not just from your own shell.
 - **Signed, not `[trusted=yes]`, repository**: this tool generates a dedicated, passphrase-less
   GPG key the first time it's needed (in `/var/lib/local-apt-repo-updater/gnupg`, mode `0700`, with
-  no passphrase since it must sign unattended from the Pre-Invoke hook — its secrecy comes entirely
+  no passphrase since it must sign unattended from the Pre-Invoke hook; its secrecy comes entirely
   from that directory's permissions, not a passphrase) and uses it to produce a real `InRelease` /
   `Release.gpg` on every rebuild. `install-sources-list` exports the matching public key and points
   the sources.list entry at it via `signed-by=`, so `apt update` cryptographically verifies the
   repo instead of trusting it unconditionally. This protects against corruption or tampering of the
   repo directory by anything that doesn't hold that key; it does **not** verify that the upstream
-  `.deb` a provider downloaded is what the vendor actually published — see "Upstream authenticity"
-  below for why. If `/var/lib/local-apt-repo-updater/gnupg` is ever lost, a new key is generated and
-  re-exported automatically on the next rebuild (or the next `install-sources-list` run) — no manual
+  `.deb` a provider downloaded is what the vendor actually published (see "Upstream authenticity"
+  below for why). If `/var/lib/local-apt-repo-updater/gnupg` is ever lost, a new key is generated and
+  re-exported automatically on the next rebuild (or the next `install-sources-list` run); no manual
   re-trust step needed, since `signed-by=` just reads whatever key is currently at that path.
 - **`apt_repo_directory` must only be writable by root**: since this tool re-signs whatever
   `.deb` files it finds there on every rebuild, write access to that directory is equivalent to
-  write access to the signed repo — anyone who can drop a file in gets it legitimately signed on
+  write access to the signed repo. Anyone who can drop a file in gets it legitimately signed on
   the next run. Both the normal run and `install-sources-list` refuse to proceed if the directory
   (once it exists) isn't owned by root or is group-/world-writable, raising a clear error instead
   of silently trusting it. This only checks the directory itself, not its ancestors or POSIX ACLs,
@@ -240,7 +255,7 @@ pulls from give it anything to verify that against:
   something this tool can check generically.
 - **`fixed_urls`**: entirely vendor-dependent; assume nothing is verifiable unless you know
   otherwise for your specific source.
-- **`apache_directory`**: just an HTML directory listing — no signatures at all. If an entry here
+- **`apache_directory`**: just an HTML directory listing, no signatures at all. If an entry here
   is actually mirroring a real signed apt repo (as opposed to a bare `.deb` dump), the better fix
   is to skip this tool for that source and add the vendor's real apt repo (with their real signing
   key) directly instead.
